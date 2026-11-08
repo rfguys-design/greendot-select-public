@@ -1,0 +1,29 @@
+# secrets -- NEVER commit
+.env
+*.key
+
+# machine-specific config
+greendot/config_local.py
+
+# generated output
+audio/
+crops/
+*.mp3
+*.wav
+capture_log.csv
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Large video files for the competition video, never commit
+video/
+

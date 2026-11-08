@@ -1,0 +1,16 @@
+# core
+opencv-python>=4.9
+numpy>=1.26
+pygame>=2.5
+pynput>=1.7
+openai>=1.40
+
+# optional -- degrade gracefully if missing
+sounddevice>=0.4      # speech input
+pyperclip>=1.8        # clipboard
+pytesseract>=0.3      # local OCR (also needs the tesseract binary installed)
+matplotlib>=3.8       # charts from tables
+pyttsx3>=2.90         # offline TTS fallback
+
+# dev
+pytest>=8.0
