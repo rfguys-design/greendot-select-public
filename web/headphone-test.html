@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Headphone Test</title>
+<style>
+  :root {
+    --bg: #0f1a14; --card: #1a2a21; --line: #2c4236; --ink: #eef5f0; --muted: #9fb3a7;
+    --green: #22c55e; --red: #f87171; --amber: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto; max-width: 640px; padding: 16px;
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.45 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+  h1 { font-size: 22px; margin: 4px 0 2px; }
+  h2 { font-size: 17px; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 12px; }
+  .card { background: var(--card); border-radius: 14px; padding: 14px; margin: 12px 0; }
+  button {
+    font: inherit; font-weight: 600; width: 100%; margin-top: 8px; padding: 14px;
+    border: 0; border-radius: 12px; background: var(--green); color: #06210f;
+  }
+  button.alt { background: var(--line); color: var(--ink); }
+  button:disabled { opacity: .4; }
+  .count { font-size: 56px; font-weight: 700; text-align: center; line-height: 1.1; transition: color .2s; }
+  .count.hit { color: var(--green); }
+  .status { text-align: center; color: var(--muted); min-height: 1.5em; }
+  ol { padding-left: 20px; margin: 4px 0; } li { margin: 5px 0; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .pass { color: var(--green); } .fail { color: var(--red); } .wait { color: var(--amber); }
+  label { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+  input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--green); }
+  .hint { color: var(--muted); font-size: 14px; margin: 2px 0 0 32px; }
+  pre {
+    margin: 0; padding: 10px; max-height: 280px; overflow: auto; border-radius: 10px;
+    background: #0a120d; white-space: pre-wrap; font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+  }
+  .warn { background: #3b2a0a; color: var(--amber); }
+</style>
+</head>
+<body>
+<h1>GreenDot headphone test</h1>
+<p class="sub">Checks whether a tap on your headphones reaches this page, including after the microphone has been used.</p>
+
+<div class="card warn" id="insecure" hidden>This page must be opened over https:// or the microphone will not work.</div>
+
+<div class="card">
+  <h2>Steps</h2>
+  <ol>
+    <li>Connect your headphones. Turn the volume up and turn on Do Not Disturb.</li>
+    <li>Tap <b>Start</b>. Keep this page open; don't lock the phone.</li>
+    <li>Put the phone down. Press the headphone button <b>3 times</b>, a few seconds apart. Each press should beep.</li>
+    <li>Turn on <b>Record after each press</b>. Press again, say something for 3 seconds, and listen to it played back. Repeat <b>3 times</b>.</li>
+    <li>Tap <b>Copy report</b> and send it, or take a screenshot of the Results box.</li>
+  </ol>
+  <button id="start">Start</button>
+  <label><input type="checkbox" id="cycle"> Record after each press</label>
+  <p class="hint">Beep, record 3 s, beep, play it back, then wait for the next press.</p>
+  <label><input type="checkbox" id="keepmic"> Keep the microphone open between presses</label>
+  <p class="hint">Optional extra test. GreenDot will not do this, but it shows whether an open mic blocks the button.</p>
+</div>
+
+<div class="card">
+  <div class="count" id="count">0</div>
+  <div class="status" id="status">Not started</div>
+  <button class="alt" id="fake">On-screen test press</button>
+</div>
+
+<div class="card">
+  <h2>Results</h2>
+  <div id="checks"></div>
+  <button class="alt" id="copy">Copy report</button>
+</div>
+
+<div class="card">
+  <h2>Event log</h2>
+  <pre id="log"></pre>
+</div>
+
+<audio id="keep" playsinline></audio>
+<audio id="playback" playsinline></audio>
+
+<script>
+const $ = id => document.getElementById(id);
+const t0 = performance.now();
+const lines = [];
+const state = {
+  started: false, busy: false, presses: 0, idlePresses: 0, pressesAfterCycle: 0,
+  pressesWhileBusy: 0, cycles: 0, peak: 0, sources: {}, wake: false, mediaSession: 'mediaSession' in navigator,
+};
+let ctx, keep, stream, wakeLock, lastPress = 0;
+
+function log(msg) {
+  const s = ((performance.now() - t0) / 1000).toFixed(1).padStart(6);
+  lines.push(`${s}s  ${msg}`);
+  $('log').textContent = lines.slice(-150).join('\n');
+  $('log').scrollTop = 1e9;
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// A 2 s near-silent WAV, looped, so the page counts as "now playing" and
+// receives the headphone's media button. Tiny noise rather than pure zeros,
+// since some systems treat all-zero audio as not playing.
+function silentWavUrl() {
+  const rate = 8000, n = rate * 2, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, (Math.random() * 4 - 2) | 0, true);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+
+async function beep(freq, secs) {
+  if (!ctx) return;
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.frequency.value = freq; g.gain.value = 0.25;
+  o.connect(g).connect(ctx.destination);
+  o.start(); o.stop(ctx.currentTime + secs);
+  await sleep(secs * 1000 + 60);
+}
+
+async function playKeep(why) {
+  try { await keep.play(); }
+  catch (e) { log(`keep-alive audio would not play (${why}): ${e.name}`); }
+  if (state.mediaSession) navigator.mediaSession.playbackState = 'playing';
+}
+
+function setupMediaSession() {
+  if (!state.mediaSession) { log('Media Session API: NOT supported'); return; }
+  navigator.mediaSession.metadata = new MediaMetadata({ title: 'GreenDot Select', artist: 'Headphone test' });
+  const ok = [];
+  for (const a of ['play', 'pause', 'stop', 'nexttrack', 'previoustrack', 'seekforward', 'seekbackward', 'togglemicrophone', 'hangup']) {
+    try { navigator.mediaSession.setActionHandler(a, () => press('mediaSession:' + a)); ok.push(a); }
+    catch (e) { /* this browser doesn't know the action */ }
+  }
+  log('media session handlers: ' + ok.join(', '));
+}
+
+async function requestWake() {
+  if (!('wakeLock' in navigator)) { log('Wake Lock API: not supported'); return; }
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    state.wake = true; log('screen wake lock on');
+    wakeLock.addEventListener('release', () => { state.wake = false; log('screen wake lock released'); render(); });
+  } catch (e) { log('wake lock failed: ' + e.name); }
+  render();
+}
+
+function press(src) {
+  const now = performance.now();
+  if (now - lastPress < 400) { log(`(duplicate ignored: ${src})`); return; }
+  lastPress = now;
+  state.presses++;
+  state.sources[src] = (state.sources[src] || 0) + 1;
+  log(`PRESS #${state.presses} via ${src}${state.busy ? '  [during a recording cycle]' : ''}`);
+  const c = $('count'); c.textContent = state.presses; c.classList.add('hit'); setTimeout(() => c.classList.remove('hit'), 400);
+  if (!state.started) { render(); return; }
+  if (state.busy) { state.pressesWhileBusy++; render(); return; }
+  if (state.cycles > 0) state.pressesAfterCycle++; else state.idlePresses++;
+  if ($('cycle').checked) runCycle();
+  else { beep(880, 0.12); playKeep('after press'); setStatus('Press received'); }
+  render();
+}
+
+function pickMime() {
+  for (const m of ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/aac'])
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+  return '';
+}
+
+async function runCycle() {
+  state.busy = true; render();
+  setStatus('Listening... say something');
+  await beep(880, 0.15);
+  try {
+    if (!stream || !stream.active) stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mime = pickMime();
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    const src = ctx.createMediaStreamSource(stream), an = ctx.createAnalyser();
+    an.fftSize = 1024; src.connect(an);
+    const data = new Float32Array(an.fftSize);
+    let peak = 0;
+    const iv = setInterval(() => {
+      an.getFloatTimeDomainData(data);
+      let s = 0; for (const x of data) s += x * x;
+      peak = Math.max(peak, Math.sqrt(s / data.length));
+    }, 50);
+    const stopped = new Promise(r => { rec.onstop = r; });
+    rec.start(); await sleep(3000); rec.stop(); await stopped;
+    clearInterval(iv); src.disconnect();
+    if (!$('keepmic').checked) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    state.peak = Math.max(state.peak, peak);
+    const blob = new Blob(chunks, { type: rec.mimeType });
+    log(`recorded ${(blob.size / 1024).toFixed(0)} KB, ${rec.mimeType || 'default type'}, level ${(peak * 100).toFixed(1)}`);
+    await beep(660, 0.12);
+    setStatus('Playing it back');
+    const pb = $('playback');
+    pb.src = URL.createObjectURL(blob);
+    try {
+      await pb.play();
+      await Promise.race([new Promise(r => { pb.onended = r; }), sleep(6000)]);
+    } catch (e) { log('playback failed: ' + e.name); }
+    state.cycles++;
+    log(`cycle ${state.cycles} done`);
+  } catch (e) {
+    log(`cycle error: ${e.name} ${e.message}`);
+  }
+  state.busy = false;
+  await playKeep('after cycle');
+  setStatus('Ready. Press your headphones again.');
+  render();
+}
+
+function setStatus(s) { $('status').textContent = s; }
+
+function checks() {
+  const c = (ok, pending) => ok ? ['PASS', 'pass'] : pending ? ['waiting', 'wait'] : ['FAIL', 'fail'];
+  const after = state.cycles > 0;
+  return [
+    ['Media Session API available', c(state.mediaSession, false)],
+    ['Presses heard while idle (need 3)', c(state.idlePresses >= 3, true), `${state.idlePresses}`],
+    ['Microphone recorded sound', c(state.cycles > 0 && state.peak > 0.01, true), state.cycles ? `level ${(state.peak * 100).toFixed(1)}` : ''],
+    ['Presses heard after using the mic (need 2)', c(state.pressesAfterCycle >= 2, true), after ? `${state.pressesAfterCycle}` : 'record once first'],
+    ['Screen kept awake', c(state.wake, !state.started)],
+  ];
+}
+
+function render() {
+  $('checks').innerHTML = checks().map(([name, [txt, cls], extra]) =>
+    `<div class="row"><span>${name}${extra ? ` <span class="sub">(${extra})</span>` : ''}</span><b class="${cls}">${txt}</b></div>`
+  ).join('');
+}
+
+function report() {
+  const mimes = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/aac']
+    .filter(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+  return [
+    'GreenDot headphone test report',
+    `Time: ${new Date().toISOString()}`,
+    `Browser: ${navigator.userAgent}`,
+    `Headphones (fill in): `,
+    `Secure page: ${window.isSecureContext}  Media Session: ${state.mediaSession}  Wake Lock: ${'wakeLock' in navigator}`,
+    `Recording formats: ${mimes.join(', ') || 'none'}`,
+    `Keep mic open option: ${$('keepmic').checked}`,
+    '',
+    ...checks().map(([n, [t], x]) => `${t.padEnd(8)} ${n}${x ? ` (${x})` : ''}`),
+    '',
+    `Press sources: ${JSON.stringify(state.sources)}`,
+    `Presses during a recording cycle: ${state.pressesWhileBusy}`,
+    '',
+    'Log:',
+    ...lines.slice(-80),
+  ].join('\n');
+}
+
+$('start').onclick = async () => {
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  await ctx.resume();
+  keep = $('keep');
+  keep.src = silentWavUrl();
+  keep.loop = true;
+  // Some browsers pause the audio element themselves on a headphone press
+  // instead of calling a media session handler. Count that as a press too.
+  keep.addEventListener('pause', () => { if (state.started && !state.busy) { press('audio element paused'); } });
+  await playKeep('start');
+  setupMediaSession();
+  state.started = true;
+  await requestWake();
+  await beep(880, 0.12);
+  $('start').disabled = true;
+  $('start').textContent = 'Running';
+  setStatus('Ready. Put the phone down and press your headphones.');
+  log('started');
+  render();
+};
+
+$('fake').onclick = () => press('on-screen button');
+
+$('copy').onclick = async () => {
+  const text = report();
+  try { await navigator.clipboard.writeText(text); $('copy').textContent = 'Copied'; }
+  catch (e) { $('log').textContent = text; $('copy').textContent = 'Copy failed: select the log text instead'; }
+  setTimeout(() => { $('copy').textContent = 'Copy report'; }, 2500);
+};
+
+document.addEventListener('keydown', e => {
+  if (/Media|Headset|Play|Pause/i.test(e.key)) press('key:' + e.key);
+  else log('key: ' + e.key);
+});
+
+document.addEventListener('visibilitychange', async () => {
+  log('page ' + document.visibilityState);
+  if (document.visibilityState === 'visible' && state.started && !state.wake) await requestWake();
+});
+
+if (!window.isSecureContext) $('insecure').hidden = false;
+log(`loaded. secure=${window.isSecureContext} mediaSession=${state.mediaSession} wakeLock=${'wakeLock' in navigator} MediaRecorder=${!!window.MediaRecorder}`);
+render();
+</script>
+</body>
+</html>
