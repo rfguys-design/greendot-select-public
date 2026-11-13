@@ -54,7 +54,7 @@
     <li>Connect your headphones. Turn the volume up and turn on Do Not Disturb.</li>
     <li>Tap <b>Start</b>. Keep this page open; don't lock the phone.</li>
     <li>Put the phone down. Press the headphone button <b>3 times</b>, a few seconds apart. Each press should beep.</li>
-    <li>Turn on <b>Record after each press</b>. Press again, say something for 3 seconds, and listen to it played back. Repeat <b>3 times</b>.</li>
+    <li>Turn on <b>Record after each press</b>. Press the <b>headphones</b> again (not the screen), say something for 3 seconds, and listen to it played back. Repeat <b>3 times</b>.</li>
     <li>Tap <b>Copy report</b> and send it, or take a screenshot of the Results box.</li>
   </ol>
   <button id="start">Start</button>
@@ -67,7 +67,7 @@
 <div class="card">
   <div class="count" id="count">0</div>
   <div class="status" id="status">Not started</div>
-  <button class="alt" id="fake">On-screen test press</button>
+  <button class="alt" id="fake">On-screen test press (doesn't count toward results)</button>
 </div>
 
 <div class="card">
@@ -88,9 +88,11 @@
 const $ = id => document.getElementById(id);
 const t0 = performance.now();
 const lines = [];
+// Only headphone presses count toward the checks; on-screen taps are for trying the flow.
 const state = {
   started: false, busy: false, presses: 0, idlePresses: 0, pressesAfterCycle: 0,
-  pressesWhileBusy: 0, cycles: 0, peak: 0, sources: {}, wake: false, mediaSession: 'mediaSession' in navigator,
+  pressesWhileBusy: 0, cycles: 0, hwCycles: 0, hwPlaybacks: 0, peak: 0, sources: {},
+  wake: false, mediaSession: 'mediaSession' in navigator,
 };
 let ctx, keep, stream, wakeLock, lastPress = 0;
 
@@ -162,19 +164,43 @@ function press(src) {
   const c = $('count'); c.textContent = state.presses; c.classList.add('hit'); setTimeout(() => c.classList.remove('hit'), 400);
   if (!state.started) { render(); return; }
   if (state.busy) { state.pressesWhileBusy++; render(); return; }
-  if (state.cycles > 0) state.pressesAfterCycle++; else state.idlePresses++;
-  if ($('cycle').checked) runCycle();
+  const hw = src !== 'on-screen button';
+  if (hw) { if (state.cycles > 0) state.pressesAfterCycle++; else state.idlePresses++; }
+  if ($('cycle').checked) runCycle(hw);
   else { beep(880, 0.12); playKeep('after press'); setStatus('Press received'); }
   render();
 }
 
 function pickMime() {
-  for (const m of ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/aac'])
+  // mp4 first: every browser can decode it back through Web Audio for playback.
+  for (const m of ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/aac'])
     if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
   return '';
 }
 
-async function runCycle() {
+// Play through the AudioContext unlocked by the Start tap. Safari blocks a new
+// <audio> element started from a headphone press (NotAllowedError), but a
+// running AudioContext can keep playing without another tap.
+async function playBlob(blob) {
+  try {
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    const ended = new Promise(r => { src.onended = r; });
+    src.start();
+    await Promise.race([ended, sleep(buf.duration * 1000 + 1000)]);
+    return 'web audio';
+  } catch (e) {
+    log(`web audio playback failed: ${e.name}; trying an audio element`);
+  }
+  const pb = $('playback');
+  pb.src = URL.createObjectURL(blob);
+  await pb.play();
+  await Promise.race([new Promise(r => { pb.onended = r; }), sleep(6000)]);
+  return 'audio element';
+}
+
+async function runCycle(hw) {
   state.busy = true; render();
   setStatus('Listening... say something');
   await beep(880, 0.15);
@@ -202,14 +228,14 @@ async function runCycle() {
     log(`recorded ${(blob.size / 1024).toFixed(0)} KB, ${rec.mimeType || 'default type'}, level ${(peak * 100).toFixed(1)}`);
     await beep(660, 0.12);
     setStatus('Playing it back');
-    const pb = $('playback');
-    pb.src = URL.createObjectURL(blob);
     try {
-      await pb.play();
-      await Promise.race([new Promise(r => { pb.onended = r; }), sleep(6000)]);
+      const how = await playBlob(blob);
+      log(`played back via ${how}`);
+      if (hw) state.hwPlaybacks++;
     } catch (e) { log('playback failed: ' + e.name); }
     state.cycles++;
-    log(`cycle ${state.cycles} done`);
+    if (hw) state.hwCycles++;
+    log(`cycle ${state.cycles} done (started by ${hw ? 'headphones' : 'screen'})`);
   } catch (e) {
     log(`cycle error: ${e.name} ${e.message}`);
   }
@@ -226,9 +252,10 @@ function checks() {
   const after = state.cycles > 0;
   return [
     ['Media Session API available', c(state.mediaSession, false)],
-    ['Presses heard while idle (need 3)', c(state.idlePresses >= 3, true), `${state.idlePresses}`],
+    ['Headphone presses heard while idle (need 3)', c(state.idlePresses >= 3, true), `${state.idlePresses}`],
     ['Microphone recorded sound', c(state.cycles > 0 && state.peak > 0.01, true), state.cycles ? `level ${(state.peak * 100).toFixed(1)}` : ''],
-    ['Presses heard after using the mic (need 2)', c(state.pressesAfterCycle >= 2, true), after ? `${state.pressesAfterCycle}` : 'record once first'],
+    ['Playback after a headphone press', c(state.hwPlaybacks > 0, state.hwCycles === 0), state.hwCycles ? `${state.hwPlaybacks} of ${state.hwCycles}` : 'press headphones with recording on'],
+    ['Headphone presses heard after using the mic (need 2)', c(state.pressesAfterCycle >= 2, true), after ? `${state.pressesAfterCycle}` : 'record once first'],
     ['Screen kept awake', c(state.wake, !state.started)],
   ];
 }
@@ -262,6 +289,8 @@ function report() {
 }
 
 $('start').onclick = async () => {
+  if (state.started || $('start').disabled) return;
+  $('start').disabled = true;
   ctx = new (window.AudioContext || window.webkitAudioContext)();
   await ctx.resume();
   keep = $('keep');
@@ -275,7 +304,6 @@ $('start').onclick = async () => {
   state.started = true;
   await requestWake();
   await beep(880, 0.12);
-  $('start').disabled = true;
   $('start').textContent = 'Running';
   setStatus('Ready. Put the phone down and press your headphones.');
   log('started');
